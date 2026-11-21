@@ -75,6 +75,8 @@ struct StatusViewLayout: Equatable, Sendable {
   var focus: [StatusViewRow] = []
   var later: [StatusViewRow] = []
   var settled: [StatusViewRow] = []
+  /// May create, rename, reorder and delete pin sections.
+  var canManageSections = false
   /// Earliest future instant at which the layout can change by time alone.
   var nextChangeAt: Double?
 
@@ -90,8 +92,27 @@ struct StatusViewLayout: Equatable, Sendable {
   /// Ids rendered in the Pinned area, children included.
   var pinnedIds: Set<String> { Set(pinned.flatMap(\.rows).flatMap(\.family).map(\.id)) }
 
-  /// Whether any row offers pin placement; section management is offered on the same permission.
-  var canManageSections: Bool { index.values.contains(where: \.canPrefer) }
+  /// The layout with every status, pin and section action withdrawn (a read-only member).
+  var readOnly: StatusViewLayout {
+    func strip(_ row: StatusViewRow) -> StatusViewRow {
+      var row = row
+      row.canManage = false
+      row.canPrefer = false
+      row.children = row.children.map(strip)
+      return row
+    }
+    var result = self
+    result.pinned = pinned.map { section in
+      var section = section
+      section.rows = section.rows.map(strip)
+      return section
+    }
+    result.focus = focus.map(strip)
+    result.later = later.map(strip)
+    result.settled = settled.map(strip)
+    result.canManageSections = false
+    return result
+  }
 
   func rows(in area: StatusViewArea) -> [StatusViewRow] {
     switch area {
@@ -112,7 +133,7 @@ struct StatusViewLayout: Equatable, Sendable {
 }
 
 extension StatusViewLayout: Decodable {
-  private enum CodingKeys: String, CodingKey { case pinned, focus, later, settled, nextChangeAt }
+  private enum CodingKeys: String, CodingKey { case pinned, focus, later, settled, canManageSections, nextChangeAt }
 
   init(from decoder: any Decoder) throws {
     let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -123,6 +144,7 @@ extension StatusViewLayout: Decodable {
     focus = rows(.focus)
     later = rows(.later)
     settled = rows(.settled)
+    canManageSections = (try? values.decodeIfPresent(Bool.self, forKey: .canManageSections)) ?? false
     nextChangeAt = (try? values.decodeIfPresent(Double.self, forKey: .nextChangeAt)) ?? nil
   }
 }
@@ -131,13 +153,65 @@ extension StatusViewLayout: Decodable {
 struct StatusViewLayouts: Decodable, Equatable, Sendable {
   var mine: StatusViewLayout
   var team: StatusViewLayout
+  /// Server-clock instant the layouts were computed at.
+  var nowMs: Double = .nan
+  /// False until the workspace `pinSection` rows have been read once.
+  var sectionsLoaded = true
 
-  func layout(team: Bool) -> StatusViewLayout { team ? self.team : mine }
+  private enum CodingKeys: String, CodingKey { case mine, team, nowMs, sectionsLoaded }
+
+  init(mine: StatusViewLayout, team: StatusViewLayout, nowMs: Double = .nan, sectionsLoaded: Bool = true) {
+    self.mine = mine
+    self.team = team
+    self.nowMs = nowMs
+    self.sectionsLoaded = sectionsLoaded
+  }
+
+  init(from decoder: any Decoder) throws {
+    let values = try decoder.container(keyedBy: CodingKeys.self)
+    mine = try values.decode(StatusViewLayout.self, forKey: .mine)
+    team = try values.decode(StatusViewLayout.self, forKey: .team)
+    nowMs = (try? values.decodeIfPresent(Double.self, forKey: .nowMs)) ?? .nan
+    sectionsLoaded = (try? values.decodeIfPresent(Bool.self, forKey: .sectionsLoaded)) ?? true
+  }
+
+  /// The layout a Home scope renders. A read-only member (the host knows the role, the runtime
+  /// may not yet) gets no actions; sections are not managed before their rows have been read.
+  func layout(team: Bool, readOnly: Bool = false) -> StatusViewLayout {
+    var layout = team ? self.team : mine
+    if readOnly { layout = layout.readOnly }
+    if !sectionsLoaded { layout.canManageSections = false }
+    return layout
+  }
 
   /// The row as the scope that lists it renders it (the conversation page has no scope of its own).
-  func row(_ id: String, team preferred: Bool) -> StatusViewRow? {
-    layout(team: preferred).index[id] ?? layout(team: !preferred).index[id]
+  func row(_ id: String, team preferred: Bool, readOnly: Bool = false) -> StatusViewRow? {
+    layout(team: preferred, readOnly: readOnly).index[id] ?? layout(team: !preferred, readOnly: readOnly).index[id]
   }
+
+  static func == (left: StatusViewLayouts, right: StatusViewLayouts) -> Bool {
+    // `nowMs` is NaN until a runtime sends it; compare it by value so equal snapshots stay equal.
+    left.mine == right.mine && left.team == right.team && left.sectionsLoaded == right.sectionsLoaded
+      && (left.nowMs == right.nowMs || (left.nowMs.isNaN && right.nowMs.isNaN))
+  }
+}
+
+/// The runtime's server clock as the host sees it: an offset learned from the `nowMs` a catalog or
+/// `snoozePresets()` reply carries, applied to the device clock. An offset beyond `limit` comes from
+/// a snapshot restored from cache rather than clock skew, so it is ignored.
+struct StatusViewClock: Equatable, Sendable {
+  static let limit = 10 * 60_000.0
+  private(set) var offset = 0.0
+  private var lastServerNow: Double?
+
+  mutating func observe(serverNow: Double, deviceNow: Double) {
+    guard serverNow.isFinite, serverNow != lastServerNow else { return }
+    lastServerNow = serverNow
+    let next = serverNow - deviceNow
+    if abs(next) <= Self.limit { offset = next }
+  }
+
+  func now(device: Double) -> Double { device + offset }
 }
 
 /// `catalog.pinSections`: section definitions in display order (the default section is implicit).
@@ -220,32 +294,11 @@ enum StatusViewCommand: Equatable, Sendable {
   }
 }
 
-/// One `snoozePresets()` entry: web `SnoozePreset` (`oneHour`, `laterToday`, `tomorrowMorning`, `nextWeek`).
-struct StatusViewSnoozePreset: Decodable, Equatable, Sendable {
+/// One `snoozePresets()` entry: `oneHour`, `laterToday`, `tomorrowMorning` or `nextWeek`, with the
+/// wake-up instant it resolves to on the server clock.
+struct StatusViewSnoozePreset: Equatable, Sendable {
   var id: String
   var timestamp: Double
-
-  private enum CodingKeys: String, CodingKey { case id, timestamp, until }
-
-  init(id: String, timestamp: Double) {
-    self.id = id
-    self.timestamp = timestamp
-  }
-
-  init(from decoder: any Decoder) throws {
-    let values = try decoder.container(keyedBy: CodingKeys.self)
-    id = try values.decode(String.self, forKey: .id)
-    timestamp = try values.decodeIfPresent(Double.self, forKey: .timestamp) ?? values.decode(Double.self, forKey: .until)
-  }
-
-  /// Accepts a bare array or `{ presets: [...] }`; malformed entries are dropped.
-  static func decodeList(_ data: Data) -> [StatusViewSnoozePreset]? {
-    struct Wrapped: Decodable { var presets: [Lossy<StatusViewSnoozePreset>] }
-    let decoder = JSONDecoder()
-    let entries = (try? decoder.decode([Lossy<StatusViewSnoozePreset>].self, from: data))
-      ?? (try? decoder.decode(Wrapped.self, from: data))?.presets
-    return entries?.compactMap(\.value)
-  }
 }
 
 enum StatusViewFormat {

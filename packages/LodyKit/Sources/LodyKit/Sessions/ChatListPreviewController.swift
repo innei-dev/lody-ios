@@ -73,7 +73,8 @@ final class ChatListPreviewController: UIViewController {
         ],
         focus: [layoutRow("focus-woken", .focus), layoutRow("focus-a", .focus, children: [layoutRow("focus-child", .focus)])],
         later: [layoutRow("later-a", .later, snoozedUntil: now + 2 * 3_600_000)],
-        settled: [layoutRow("settled-a", .settled)]
+        settled: [layoutRow("settled-a", .settled)],
+        canManageSections: true
       )
       list.setSections(InboxSections.home(SessionCatalog(sessions: sessions), grouping: .status, layout: layout, now: now))
       return

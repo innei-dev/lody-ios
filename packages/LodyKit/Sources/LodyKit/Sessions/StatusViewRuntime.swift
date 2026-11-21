@@ -1,29 +1,27 @@
 import Foundation
 import LodyCore
 
-/// The runtime's Status view methods. Swift builds the note's JSON (`StatusViewCommand.json`) and
-/// decodes it into the generated params, so the list depends only on the method names
-/// `statusViewCommand` and `snoozePresets`, not on how the generator names the command union.
+/// The runtime's Status view methods (`packages/cloud-runtime/src/contract/status-view.ts`). Swift
+/// builds the command JSON (`StatusViewCommand.json`) and decodes it into the generated params, so
+/// the list keeps one Swift command type instead of mirroring the generated union case by case.
 @MainActor
 enum StatusViewRuntime {
-  static func command(_ workspaceId: String, _ command: StatusViewCommand) async throws {
+  /// Runs `command` in the Home `scope` it came from (`move.beforeId` resolves against that list).
+  /// Returns how many rows the runtime wrote; 0 means the planner refused it or it was a no-op.
+  static func command(_ workspaceId: String, _ command: StatusViewCommand, scope: HomeScope) async throws -> Int {
     let runtime = try scoped(workspaceId)
     let params = try RuntimeJSON.decode(
       RuntimeContract.Calls.StatusViewCommand.Params.self,
-      from: ["workspaceId": workspaceId, "command": command.json] as [String: Any]
+      from: ["workspaceId": workspaceId, "command": command.json, "scope": scope.rawValue] as [String: Any]
     )
-    _ = try await runtime.perform(RuntimeContract.Calls.StatusViewCommand.self, params)
+    return try await runtime.perform(RuntimeContract.Calls.StatusViewCommand.self, params).writes
   }
 
-  /// The four Later presets with their resolved instants, computed by the runtime on its clock.
-  static func presets(_ workspaceId: String) async throws -> [StatusViewSnoozePreset] {
+  /// The four Later presets resolved on the server clock, and that clock's current instant.
+  static func presets(_ workspaceId: String) async throws -> (nowMs: Double, presets: [StatusViewSnoozePreset]) {
     let runtime = try scoped(workspaceId)
-    let params = try RuntimeJSON.decode(RuntimeContract.Calls.SnoozePresets.Params.self, from: ["workspaceId": workspaceId] as [String: Any])
-    let result = try await runtime.perform(RuntimeContract.Calls.SnoozePresets.self, params)
-    guard let presets = StatusViewSnoozePreset.decodeList(try JSONEncoder().encode(result)) else {
-      throw DataRuntime.failure("command_failed", "invalid_result: snoozePresets")
-    }
-    return presets
+    let result = try await runtime.perform(RuntimeContract.Calls.SnoozePresets.self, RuntimeContract.Empty())
+    return (result.nowMs, result.presets.map { StatusViewSnoozePreset(id: $0.id.rawValue, timestamp: $0.until) })
   }
 
   private static func scoped(_ workspaceId: String) throws -> DataRuntime {

@@ -444,7 +444,7 @@ let statusSaved = """
 {"id":"settled-a","title":"Done","projectId":"p","createdAt":"2026-01-02T03:04:05Z","lastMessageAt":\(now - 200 * hour)},
 {"id":"read-only","title":"Teammate's","projectId":"p","createdAt":"2026-01-02T03:04:05Z","lastMessageAt":\(now - hour)}
 ],
-"pinSections":[{"id":"maint","name":"Maintenance","orderKey":"80"},{"broken":true}],
+"pinSections":[{"id":"maint","name":"Maintenance","orderKey":"80"},{"id":"empty","name":"Empty","orderKey":"90"},{"broken":true}],
 "statusView":{
  "mine":{
   "pinned":[
@@ -460,15 +460,19 @@ let statusSaved = """
   ],
   "later":[{"id":"later-a","tier":"later","children":[],"activityAt":\(now - hour),"unread":false,"snoozedUntil":\(now + 2 * hour + 60_000),"woken":false,"canManage":true,"canPrefer":true}],
   "settled":[{"id":"settled-a","tier":"settled","children":[],"activityAt":\(now - 200 * hour),"unread":false,"snoozedUntil":null,"woken":false,"canManage":true,"canPrefer":true}],
+  "canManageSections":true,
   "nextChangeAt":\(now + 2 * hour)
  },
- "team":{"pinned":[],"focus":[],"later":[],"settled":[],"nextChangeAt":null}
+ "team":{"pinned":[],"focus":[],"later":[],"settled":[],"canManageSections":false,"nextChangeAt":null},
+ "nowMs":\(now),
+ "sectionsLoaded":true
 }}}
 """
 let statusCatalog = SessionCatalog.decode(saved: Data(statusSaved.utf8))!
 let statusLayouts = statusCatalog.statusView!
 let statusLayout = statusLayouts.mine
-precondition(statusCatalog.pinSections.map(\.id) == ["maint"], "Malformed pin section rows are dropped, not the catalog")
+precondition(statusCatalog.pinSections.map(\.id) == ["maint", "empty"], "Malformed pin section rows are dropped, not the catalog")
+precondition(statusLayouts.nowMs == now && statusLayouts.sectionsLoaded && statusLayout.canManageSections && !statusLayouts.team.canManageSections)
 precondition(statusLayout.focus.map(\.id) == ["focus-old", "focus-new", "read-only"], "Unknown tiers drop only that row")
 precondition(statusLayout.focus[1].children.map(\.id) == ["focus-child"] && statusLayout.later[0].snoozedUntil != nil)
 precondition(statusLayout.nextChangeAt == now + 2 * hour && statusLayouts.team.focus.isEmpty)
@@ -604,6 +608,39 @@ precondition(commandJSON(.move(sessionId: "s", to: .pinned(nil), beforeId: nil))
 precondition(commandJSON(.move(sessionId: "s", to: .focus, beforeId: "t")) == #"{"beforeId":"t","sessionId":"s","to":{"area":"focus"},"type":"move"}"#)
 precondition(commandJSON(.snooze(sessionId: "s", until: 5, includeOpened: true)) == #"{"includeOpened":true,"sessionId":"s","type":"snooze","until":5}"#)
 precondition(commandJSON(.moveSection(sectionId: "a", beforeId: nil)) == #"{"beforeId":null,"sectionId":"a","type":"moveSection"}"#)
-precondition(StatusViewSnoozePreset.decodeList(Data(#"[{"id":"oneHour","timestamp":5,"countdown":"1h"},{"id":"bad"}]"#.utf8)) == [StatusViewSnoozePreset(id: "oneHour", timestamp: 5)])
-precondition(StatusViewSnoozePreset.decodeList(Data(#"{"presets":[{"id":"nextWeek","until":9}]}"#.utf8)) == [StatusViewSnoozePreset(id: "nextWeek", timestamp: 9)])
+
+// A read-only member (the host knows the role) and unread section rows withdraw actions.
+let readOnlyLayout = statusLayouts.layout(team: false, readOnly: true)
+precondition(readOnlyLayout.index.values.allSatisfy { !$0.canManage && !$0.canPrefer } && !readOnlyLayout.canManageSections)
+precondition(readOnlyLayout.focus.map(\.id) == statusLayout.focus.map(\.id), "Read-only members still see the same order")
+let readOnlySections = InboxSections.home(statusCatalog, grouping: .status, layout: readOnlyLayout, now: now)
+precondition(readOnlySections.allSatisfy { $0.headerMenu.isEmpty })
+precondition(readOnlySections.flatMap(\.rows).allSatisfy { $0.leadingActions.isEmpty && !$0.actions.contains { $0.id.hasPrefix("status:") } })
+var unloaded = statusLayouts
+unloaded.sectionsLoaded = false
+precondition(!unloaded.layout(team: false).canManageSections && unloaded.layout(team: false).index["focus-old"]?.canPrefer == true)
+precondition(StatusViewPlanning.drop(readOnlyLayout.focus[0], into: .focus, beforeId: nil) == nil)
+
+// The server clock: an offset learned from `nowMs`; a restored snapshot's stale instant is ignored.
+var clock = StatusViewClock()
+clock.observe(serverNow: tick + 30_000, deviceNow: tick)
+precondition(clock.now(device: tick + 1_000) == tick + 31_000)
+clock.observe(serverNow: tick - 3 * hour, deviceNow: tick)
+precondition(clock.offset == 30_000, "A cached catalog's old nowMs is not clock skew")
+clock.observe(serverNow: .nan, deviceNow: tick)
+precondition(clock.offset == 30_000)
+
+// The runtime's own fixture catalog decodes and renders in its order.
+let runtimeFixture = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+  .appendingPathComponent("../../../../../packages/cloud-runtime/contract/fixtures/catalog-status-view.json").standardized
+let fixtureCatalog = try! JSONSerialization.jsonObject(with: Data(contentsOf: runtimeFixture))
+let fixture = SessionCatalog.decode(saved: try! JSONSerialization.data(withJSONObject: ["catalog": fixtureCatalog]))!
+let fixtureView = fixture.statusView!
+precondition(fixtureView.sectionsLoaded && fixtureView.nowMs.isFinite && !fixture.pinSections.isEmpty)
+let fixtureLayout = fixtureView.layout(team: false)
+let fixtureSections = InboxSections.home(fixture, grouping: .status, layout: fixtureLayout, now: fixtureView.nowMs)
+let fixtureFocus = fixtureSections.first { $0.id == InboxSections.focusId }!.rows.filter { !$0.id.hasPrefix("view:") }.map(\.id)
+let fixtureFocusIds = fixtureLayout.focus.flatMap(\.family).map(\.id).filter { id in fixture.sessions.contains { $0.id == id } }
+precondition(fixtureFocus == fixtureFocusIds, "\(fixtureFocus) vs \(fixtureFocusIds)")
+precondition(Array(fixtureSections.prefix(fixtureLayout.pinned.count).map(\.id)) == fixtureLayout.pinned.map { StatusViewArea.pinned($0.sectionId).sectionId })
 print("PASS: Status view layout decodes, renders in runtime order, plans drops and holds them until read-back")

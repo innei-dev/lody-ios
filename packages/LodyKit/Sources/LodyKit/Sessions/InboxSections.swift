@@ -61,7 +61,7 @@ enum InboxSections {
     var home = HomeRows(catalog, now: now)
     let index = layout.index
     let pinnedIds = layout.pinnedIds
-    let pinned = pinnedArea(layout, home: home, index: index)
+    let pinned = pinnedArea(layout, home: home, index: index, sections: catalog.pinSections.map(\.id))
     if let owner {
       home.families = home.families.filter { family in ([family.session] + family.children).contains { $0.userId == owner } }
     }
@@ -109,8 +109,11 @@ enum InboxSections {
   /// Status row actions (`rowAction`); `later` opens the Later sheet.
   static let statusActions = (settle: "status:settle", later: "status:later", focus: "status:focus")
 
-  private static func pinnedArea(_ layout: StatusViewLayout, home: HomeRows, index: [String: StatusViewRow]) -> [LodyListSection] {
-    let userSections = layout.pinned.compactMap(\.sectionId)
+  /// `sections` are the pin section definitions in render order; Move Up / Move Down follow them.
+  private static func pinnedArea(
+    _ layout: StatusViewLayout, home: HomeRows, index: [String: StatusViewRow], sections: [String]
+  ) -> [LodyListSection] {
+    let userSections = sections.isEmpty ? layout.pinned.compactMap(\.sectionId) : sections
     let manages = layout.canManageSections
     return layout.pinned.map { pinned in
       let area = StatusViewArea.pinned(pinned.sectionId)

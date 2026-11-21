@@ -14,15 +14,28 @@ final class StatusViewActions {
   private var presets: (at: Date, items: [StatusViewSnoozePreset], workspaceId: String)?
   private var presetsTask: Task<Void, Never>?
 
+  /// The runtime's server clock; layouts, countdowns and presets are all on it.
+  static var clock = StatusViewClock()
+  static var now: Double { clock.now(device: LodyRelativeTime.now()) }
+
   init(source: SessionSource) {
     self.source = source
   }
 
+  /// Whether the signed-in user is a read-only member (from the member list's role).
+  static func readOnly(_ state: SessionListState) -> Bool {
+    WorkspaceMembers.readOnly(userId: state.userId, workspaceId: state.workspaceId) == true
+  }
+
   /// The layout Home shows in the current scope.
-  var layout: StatusViewLayout? { source.state.catalog.statusView?.layout(team: HomeScope.stored == .team) }
+  var layout: StatusViewLayout? {
+    let state = source.state
+    return state.catalog.statusView?.layout(team: HomeScope.stored == .team, readOnly: Self.readOnly(state))
+  }
 
   func row(_ id: String) -> StatusViewRow? {
-    source.state.catalog.statusView?.row(id, team: HomeScope.stored == .team)
+    let state = source.state
+    return state.catalog.statusView?.row(id, team: HomeScope.stored == .team, readOnly: Self.readOnly(state))
   }
 
   // MARK: Menus
@@ -79,7 +92,7 @@ final class StatusViewActions {
       UIAction(title: presetTitle(preset.id), subtitle: Self.resolved(preset.timestamp)) { [weak self, weak controller] _ in
         guard let self, let controller else { return }
         Task {
-          let fresh = (try? await StatusViewRuntime.presets(workspaceId))?.first { $0.id == preset.id }
+          let fresh = (try? await self.loadPresets(workspaceId))?.first { $0.id == preset.id }
           self.snooze(id, until: fresh?.timestamp ?? preset.timestamp, from: controller)
         }
       }
@@ -96,10 +109,10 @@ final class StatusViewActions {
   private func sectionMenu(_ row: StatusViewRow, layout: StatusViewLayout, from controller: UIViewController) -> UIMenu {
     let id = row.id
     let current = row.tier == .pinned ? layout.root(of: id)?.area : nil
+    // Section definitions arrive in render order, including sections the layout leaves out.
     var targets: [(StatusViewArea, String)] = [(.pinned(nil), text("inbox.section.pinned"))]
-    for section in layout.pinned {
-      guard let sectionId = section.sectionId else { continue }
-      targets.append((.pinned(sectionId), section.name ?? ""))
+    if source.state.catalog.statusView?.sectionsLoaded != false {
+      targets += source.state.catalog.pinSections.map { (StatusViewArea.pinned($0.id), $0.name) }
     }
     var children: [UIMenuElement] = targets.filter { $0.0 != current }.map { area, name in
       UIAction(title: name) { [weak self] _ in
@@ -107,16 +120,18 @@ final class StatusViewActions {
         self?.move(.move(sessionId: id, to: area, beforeId: top))
       }
     }
-    children.append(UIAction(title: text("home.pins.newSection"), image: UIImage(systemName: "plus")) { [weak self, weak controller] _ in
-      guard let controller else { return }
-      self?.promptSectionName(title: self?.text("home.pins.newSection") ?? "", initial: "", from: controller) { name in
-        let sectionId = UUID().uuidString.lowercased()
-        Task { [weak self] in
-          guard let self, await self.perform(.createSection(sectionId: sectionId, name: name)) else { return }
-          self.move(.move(sessionId: id, to: .pinned(sectionId), beforeId: nil))
+    if layout.canManageSections {
+      children.append(UIAction(title: text("home.pins.newSection"), image: UIImage(systemName: "plus")) { [weak self, weak controller] _ in
+        guard let controller else { return }
+        self?.promptSectionName(title: self?.text("home.pins.newSection") ?? "", initial: "", from: controller) { name in
+          let sectionId = UUID().uuidString.lowercased()
+          Task { [weak self] in
+            guard let self, (await self.perform(.createSection(sectionId: sectionId, name: name)) ?? 0) > 0 else { return }
+            self.move(.move(sessionId: id, to: .pinned(sectionId), beforeId: nil))
+          }
         }
-      }
-    })
+      })
+    }
     return UIMenu(title: text("home.status.moveToSection"), image: UIImage(systemName: "folder"), children: children)
   }
 
@@ -148,7 +163,7 @@ final class StatusViewActions {
 
   func snooze(_ id: String, until: Double, from controller: UIViewController) {
     guard let previous = row(id) else { return }
-    guard until > LodyRelativeTime.now() else {
+    guard until > Self.now else {
       LodyToastOverlay.shared.show(message: text("home.status.later.past"), kind: .error)
       return
     }
@@ -165,6 +180,7 @@ final class StatusViewActions {
     let model = StatusLaterModel(presets: cachedPresets(workspaceId))
     let sheet = UIHostingController(rootView: StatusLaterSheet(model: model))
     model.dismiss = { [weak sheet] in sheet?.dismiss(animated: true) }
+    model.serverOffset = Self.clock.offset
     model.pick = { [weak self, weak controller, weak sheet] until in
       sheet?.dismiss(animated: true)
       guard let controller else { return }
@@ -178,9 +194,7 @@ final class StatusViewActions {
     controller.present(sheet, animated: true)
     Task {
       do {
-        let items = try await StatusViewRuntime.presets(workspaceId)
-        presets = (Date(), items, workspaceId)
-        model.presets = items
+        model.presets = try await loadPresets(workspaceId)
       } catch {
         model.failed = model.presets.isEmpty
       }
@@ -191,10 +205,11 @@ final class StatusViewActions {
 
   /// `sectionAction` ids from a pin section label's ⋯ menu (`InboxSections.sectionActions`).
   func performSection(_ actionId: String, section listId: String, from controller: UIViewController) {
-    guard let layout, case .pinned(let sectionId)? = StatusViewArea(sectionId: listId) else { return }
+    guard let layout, layout.canManageSections, case .pinned(let sectionId)? = StatusViewArea(sectionId: listId) else { return }
     let actions = InboxSections.sectionActions
-    let userSections = layout.pinned.compactMap(\.sectionId)
-    let name = layout.pinned.first { $0.sectionId == sectionId }?.name ?? ""
+    let definitions = source.state.catalog.pinSections
+    let userSections = definitions.map(\.id)
+    let name = definitions.first { $0.id == sectionId }?.name ?? layout.pinned.first { $0.sectionId == sectionId }?.name ?? ""
     switch actionId {
     case actions.create:
       promptSectionName(title: text("home.pins.newSection"), initial: "", from: controller) { [weak self] name in
@@ -244,35 +259,35 @@ final class StatusViewActions {
   // MARK: Running commands
 
   func run(_ command: StatusViewCommand) {
-    Task { await perform(command) }
+    Task { _ = await perform(command) }
   }
 
   private func move(_ command: StatusViewCommand) {
     if let runMove { runMove(command) } else { run(command) }
   }
 
-  /// Runs `command`; a failure warns once. Returns whether the runtime accepted it.
-  @discardableResult
-  func perform(_ command: StatusViewCommand) async -> Bool {
+  /// Runs `command` in the current Home scope; a failure warns once. Returns the rows the runtime
+  /// wrote (0: the planner refused it or nothing changed), or nil when the write failed.
+  func perform(_ command: StatusViewCommand) async -> Int? {
     let workspaceId = source.state.workspaceId
-    guard !workspaceId.isEmpty else { return false }
+    guard !workspaceId.isEmpty else { return nil }
     do {
-      try await source.statusCommand(workspaceId, command)
-      return true
+      return try await source.statusCommand(workspaceId, command, HomeScope.stored)
     } catch {
       if source.state.workspaceId == workspaceId {
         LodyToastOverlay.shared.show(message: text("home.status.toast.failed"), kind: .error)
       }
-      return false
+      return nil
     }
   }
 
   /// Settle and Later confirm with an Undo notice that puts the conversation back where it was.
   private func confirming(_ command: StatusViewCommand, previous: StatusViewRow, opened: Bool, message: String) {
     Task {
-      guard await perform(command) else { return }
+      // Nothing written (already settled, or refused) has nothing to undo.
+      guard (await perform(command) ?? 0) > 0 else { return }
       LodyToastOverlay.shared.show(message: message, kind: .neutral, actionTitle: text("home.status.toast.undo")) { [weak self] in
-        self?.run(StatusViewPlanning.undo(previous, includeOpened: opened, now: LodyRelativeTime.now()))
+        self?.run(StatusViewPlanning.undo(previous, includeOpened: opened, now: Self.now))
       }
     }
   }
@@ -302,8 +317,16 @@ final class StatusViewActions {
 
   private func cachedPresets(_ workspaceId: String) -> [StatusViewSnoozePreset] {
     guard let presets, presets.workspaceId == workspaceId else { return [] }
-    let now = LodyRelativeTime.now()
+    let now = Self.now
     return presets.items.filter { $0.timestamp > now }
+  }
+
+  /// Fetches the presets; their `nowMs` also calibrates the server clock.
+  private func loadPresets(_ workspaceId: String) async throws -> [StatusViewSnoozePreset] {
+    let result = try await StatusViewRuntime.presets(workspaceId)
+    Self.clock.observe(serverNow: result.nowMs, deviceNow: LodyRelativeTime.now())
+    presets = (Date(), result.presets, workspaceId)
+    return result.presets
   }
 
   /// Keeps the menu's preset labels at most a minute old; picking one resolves it again.
@@ -311,10 +334,9 @@ final class StatusViewActions {
     if let presets, presets.workspaceId == workspaceId, Date().timeIntervalSince(presets.at) < 60 { return }
     guard presetsTask == nil, !workspaceId.isEmpty else { return }
     presetsTask = Task { [weak self] in
-      let items = try? await StatusViewRuntime.presets(workspaceId)
       guard let self else { return }
+      _ = try? await self.loadPresets(workspaceId)
       self.presetsTask = nil
-      if let items { self.presets = (Date(), items, workspaceId) }
     }
   }
 
@@ -324,8 +346,9 @@ final class StatusViewActions {
     return keys[id].map(text) ?? id
   }
 
+  /// A server-clock instant as the person reads it on this device.
   static func resolved(_ timestamp: Double) -> String {
-    let date = Date(timeIntervalSince1970: timestamp / 1000)
+    let date = Date(timeIntervalSince1970: (timestamp - clock.offset) / 1000)
     if Calendar.current.isDateInToday(date) { return date.formatted(date: .omitted, time: .shortened) }
     return date.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day().hour().minute())
   }
@@ -341,6 +364,8 @@ final class StatusViewActions {
 final class StatusLaterModel: ObservableObject {
   @Published var presets: [StatusViewSnoozePreset]
   @Published var failed = false
+  /// Server clock minus device clock; the date picker works on device time.
+  var serverOffset = 0.0
   var pick: @MainActor (Double) -> Void = { _ in }
   var dismiss: @MainActor () -> Void = {}
 
@@ -401,8 +426,8 @@ private struct StatusLaterSheet: View {
         Text(String(localized: "home.status.later.past", bundle: .lody)).lodyTextStyle(.footnote).foregroundStyle(LodyColor.dangerDefault)
       }
       Button {
-        let until = custom.timeIntervalSince1970 * 1000
-        guard until > LodyRelativeTime.now() else {
+        let until = custom.timeIntervalSince1970 * 1000 + model.serverOffset
+        guard until > LodyRelativeTime.now() + model.serverOffset else {
           refused = true
           return
         }

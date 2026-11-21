@@ -61,7 +61,7 @@ final class InboxController: UIViewController {
     }
     view.addSubview(list)
     wireChrome()
-    observers = (source.changes + [UIApplication.didBecomeActiveNotification, .lodyHomeGroupingChanged, .lodyProjectGroupsDidChange]).map { name in
+    observers = (source.changes + [UIApplication.didBecomeActiveNotification, .lodyHomeGroupingChanged, .lodyProjectGroupsDidChange, .lodyWorkspaceRoleDidChange]).map { name in
       NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
         MainActor.assumeIsolated {
           self?.render(onlyIfContentChanged: name == .lodyCatalogDidChange || name == .lodySessionCatalogPreviewDidChange)
@@ -183,14 +183,21 @@ final class InboxController: UIViewController {
     }
     // Every size class groups by the view menu's choice (time / project / status).
     let owner = HomeScope.stored == .mine ? state.userId : nil
-    list.setSections(InboxSections.home(catalog, grouping: HomeGrouping.stored, owner: owner, layout: layout, settledExpanded: settledExpanded))
+    // Layout times are on the server clock, so its rows age and count down against it.
+    list.setSections(InboxSections.home(
+      catalog, grouping: HomeGrouping.stored, owner: owner, layout: layout, settledExpanded: settledExpanded,
+      now: layout == nil ? LodyRelativeTime.now() : StatusViewActions.now
+    ))
   }
 
   // MARK: Status view
 
   /// The runtime layout for the current scope, with a held drop applied until it reads back.
   private func statusLayout(_ state: SessionListState) -> StatusViewLayout? {
-    guard let published = state.catalog.statusView?.layout(team: HomeScope.stored == .team) else {
+    if let nowMs = state.catalog.statusView?.nowMs {
+      StatusViewActions.clock.observe(serverNow: nowMs, deviceNow: LodyRelativeTime.now())
+    }
+    guard let published = state.catalog.statusView?.layout(team: HomeScope.stored == .team, readOnly: StatusViewActions.readOnly(state)) else {
       hold = nil
       return nil
     }
@@ -225,7 +232,7 @@ final class InboxController: UIViewController {
   /// once and keeps it until the catalog reads the write back (or the write fails).
   private func runMove(_ command: StatusViewCommand) {
     let state = source.state
-    guard let base = state.catalog.statusView?.layout(team: HomeScope.stored == .team),
+    guard let base = state.catalog.statusView?.layout(team: HomeScope.stored == .team, readOnly: StatusViewActions.readOnly(state)),
       let value = StatusViewHold(command, base: base)
     else {
       status.run(command)
@@ -242,9 +249,10 @@ final class InboxController: UIViewController {
     render()
     Task { [weak self] in
       guard let self else { return }
-      let accepted = await self.status.perform(command)
+      let writes = await self.status.perform(command)
       guard self.hold?.generation == generation else { return }
-      if accepted { self.hold?.value.acknowledged = true } else { self.hold?.value.failed = true }
+      // 0 writes: the planner refused the move or it changed nothing, so no read-back will come.
+      if let writes, writes > 0 { self.hold?.value.acknowledged = true } else { self.hold?.value.failed = true }
       self.render()
     }
   }

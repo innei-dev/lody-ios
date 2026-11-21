@@ -27,7 +27,8 @@ enum SessionWrite: Sendable {
 }
 
 typealias SessionWriteService = @MainActor (_ workspaceId: String, _ sessionId: String, _ write: SessionWrite) async throws -> Void
-typealias StatusViewService = @MainActor (_ workspaceId: String, _ command: StatusViewCommand) async throws -> Void
+/// Returns the rows written; 0 means the runtime's planner refused the command or it changed nothing.
+typealias StatusViewService = @MainActor (_ workspaceId: String, _ command: StatusViewCommand, _ scope: HomeScope) async throws -> Int
 
 @MainActor
 final class SessionSource {
@@ -41,7 +42,7 @@ final class SessionSource {
   init(
     changes: [Notification.Name], read: @escaping @MainActor () -> SessionListState,
     raw: @escaping @MainActor (String) -> String? = { _ in nil }, write: @escaping SessionWriteService,
-    statusCommand: @escaping StatusViewService = { _, _ in
+    statusCommand: @escaping StatusViewService = { _, _, _ in
       throw DataRuntime.failure("not_ready", String(localized: "native.runtime.sessionNotSynced", bundle: .lody))
     }
   ) {
@@ -67,7 +68,7 @@ final class SessionSource {
       }
       try await SessionActions.cloud(workspaceId, sessionId, write)
     },
-    statusCommand: { workspaceId, command in try await StatusViewRuntime.command(workspaceId, command) }
+    statusCommand: { workspaceId, command, scope in try await StatusViewRuntime.command(workspaceId, command, scope: scope) }
   )
 
   // A persisted local watermark clears unread emphasis.
