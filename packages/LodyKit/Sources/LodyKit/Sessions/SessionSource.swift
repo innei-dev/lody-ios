@@ -62,6 +62,10 @@ final class SessionSource {
     read: { SessionCatalogPreview.state ?? SessionPublished.state() },
     raw: { id in SessionCatalogPreview.state == nil ? SessionPublished.raw(id) : SessionCatalogPreview.raw(id) },
     write: { workspaceId, sessionId, write in
+      if StatusViewPreview.matches(workspaceId), case .archive(let archived) = write {
+        StatusViewPreview.archive(sessionId, archived: archived)
+        return
+      }
       if NativeHomeFixture.active, case .delete(let ids) = write {
         try await NativeHomeFixture.request("deleteSessions", ["sessionId": sessionId, "sessionIds": ids])
         return
@@ -190,6 +194,7 @@ enum SessionCatalogPreview {
     guard var state = base else { return nil }
     let pending = pendingSessions()
     state.catalog.sessions += try! JSONDecoder().decode([SessionItem].self, from: JSONEncoder().encode(pending)).map(SessionItem.markedPending)
+    if StatusViewPreview.matches(state.workspaceId) { StatusViewPreview.project(into: &state.catalog) }
     return state
   }
   private static func pendingSessions() -> [OutboxValue] {

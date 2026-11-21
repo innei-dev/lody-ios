@@ -24,4 +24,4 @@ Read before changing the Home Pinned area, the Status grouping (Focus / Later / 
 
 - The conversation page's More menu carries the row's Later / Settle / Move to Focus, read from whichever scope's layout lists it.
 
-- Verification: `apps/ios/verification/kit/session-rows` (decoding, including the runtime's `contract/fixtures/catalog-status-view.json`, row mapping, read-only gating, the server clock, drop and accessibility planning, holds, undo, countdown, command JSON). The Debug list preview `--ui-review-status` renders a fixture layout.
+- Verification: `apps/ios/verification/kit/session-rows` (decoding, including the runtime's `contract/fixtures/catalog-status-view.json`, row mapping, read-only gating, the server clock, drop and accessibility planning, holds, undo, countdown, command JSON). Launch the offline Home scene with `--ui-verify --ui-review-status` to exercise its production controls with scripted catalog readback. Add `--ui-review-status-long` for a scrollable Focus list.

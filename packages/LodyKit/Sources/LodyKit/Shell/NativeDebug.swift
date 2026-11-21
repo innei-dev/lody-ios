@@ -12,6 +12,8 @@ enum NativeDebug {
     let root: UIViewController
     if _isDebugAssertConfiguration(), let review = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--ui-review-cards=") }) {
       root = SessionPreviewController(scenario: "cards-" + String(review.dropFirst("--ui-review-cards=".count)))
+    } else if LodyUIVerify.status {
+      root = HomeController()
     } else if LodyUIVerify.has("--ui-review-list") {
       root = ChatListPreviewController()
     } else if LodyUIVerify.has("--ui-review-mentions") {
@@ -281,6 +283,11 @@ enum NativeHomeFixture {
     let url = Bundle.main.url(forResource: "DebugHome", withExtension: "json")!
     let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as! [String: Any]
     catalog = fixture["catalog"] as! [String: Any]
+    if LodyUIVerify.status {
+      StatusViewPreview.reset()
+      HomeGrouping.store(.status)
+      HomeScope.store(.mine)
+    }
     if LodyUIVerify.has("--ui-verify-session-tabs"), var sessions = catalog["sessions"] as? [[String: Any]],
        var tab = sessions.first(where: { $0["id"] as? String == "ui-design" }) {
       HomeScope.store(.team)

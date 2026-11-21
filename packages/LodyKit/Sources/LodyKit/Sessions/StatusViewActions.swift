@@ -12,7 +12,6 @@ final class StatusViewActions {
   /// Runs a move so the list can hold the dropped order (Home); nil runs moves directly.
   var runMove: (@MainActor (StatusViewCommand) -> Void)?
   private var presets: (at: Date, items: [StatusViewSnoozePreset], workspaceId: String)?
-  private var presetsTask: Task<Void, Never>?
 
   /// The runtime's server clock; layouts, countdowns and presets are all on it.
   static var clock = StatusViewClock()
@@ -86,17 +85,28 @@ final class StatusViewActions {
   /// Focus while snoozed. A preset is resolved again when picked, so its instant is current.
   private func laterMenu(_ row: StatusViewRow, from controller: UIViewController) -> UIMenu {
     let workspaceId = source.state.workspaceId
-    refreshPresets(workspaceId)
     let id = row.id
-    var children: [UIMenuElement] = cachedPresets(workspaceId).map { preset in
-      UIAction(title: presetTitle(preset.id), subtitle: Self.resolved(preset.timestamp)) { [weak self, weak controller] _ in
-        guard let self, let controller else { return }
-        Task {
-          let fresh = (try? await self.loadPresets(workspaceId))?.first { $0.id == preset.id }
-          self.snooze(id, until: fresh?.timestamp ?? preset.timestamp, from: controller)
+    let resolved = UIDeferredMenuElement.uncached { [weak self, weak controller] complete in
+      Task { @MainActor in
+        guard let self, let controller, self.source.state.workspaceId == workspaceId else { return complete([]) }
+        var items = self.cachedPresets(workspaceId)
+        if items.isEmpty || self.presets.map({ Date().timeIntervalSince($0.at) >= 60 }) == true {
+          items = (try? await self.loadPresets(workspaceId)) ?? items
         }
+        guard self.source.state.workspaceId == workspaceId else { return complete([]) }
+        complete(items.map { preset in
+          UIAction(title: self.presetTitle(preset.id), subtitle: Self.resolved(preset.timestamp)) { [weak self, weak controller] _ in
+            guard let self, let controller else { return }
+            Task {
+              let fresh = (try? await self.loadPresets(workspaceId))?.first { $0.id == preset.id }
+              guard self.source.state.workspaceId == workspaceId else { return }
+              self.snooze(id, until: fresh?.timestamp ?? preset.timestamp, from: controller)
+            }
+          }
+        })
       }
     }
+    var children: [UIMenuElement] = [resolved]
     children.append(UIAction(title: text("home.status.later.custom"), image: UIImage(systemName: "calendar")) { [weak self, weak controller] _ in
       guard let controller else { return }
       self?.presentLater(id, from: controller)
@@ -143,6 +153,9 @@ final class StatusViewActions {
     case InboxSections.statusActions.settle: settle(id, from: controller)
     case InboxSections.statusActions.later: presentLater(id, from: controller)
     case InboxSections.statusActions.focus: moveToFocus(id, from: controller)
+    case "pin":
+      guard let row = row(id) else { return false }
+      if row.canPrefer { run(.setPinned(sessionId: id, pinned: row.tier != .pinned)) }
     default: return false
     }
     return true
@@ -182,9 +195,10 @@ final class StatusViewActions {
     model.dismiss = { [weak sheet] in sheet?.dismiss(animated: true) }
     model.serverOffset = Self.clock.offset
     model.pick = { [weak self, weak controller, weak sheet] until in
-      sheet?.dismiss(animated: true)
-      guard let controller else { return }
-      self?.snooze(id, until: until, from: controller)
+      sheet?.dismiss(animated: true) {
+        guard let self, let controller, self.source.state.workspaceId == workspaceId else { return }
+        self.snooze(id, until: until, from: controller)
+      }
     }
     sheet.view.backgroundColor = LodyUIColor.bgBase
     if let presentation = sheet.sheetPresentationController {
@@ -195,6 +209,7 @@ final class StatusViewActions {
     Task {
       do {
         model.presets = try await loadPresets(workspaceId)
+        model.serverOffset = Self.clock.offset
       } catch {
         model.failed = model.presets.isEmpty
       }
@@ -327,17 +342,6 @@ final class StatusViewActions {
     Self.clock.observe(serverNow: result.nowMs, deviceNow: LodyRelativeTime.now())
     presets = (Date(), result.presets, workspaceId)
     return result.presets
-  }
-
-  /// Keeps the menu's preset labels at most a minute old; picking one resolves it again.
-  private func refreshPresets(_ workspaceId: String) {
-    if let presets, presets.workspaceId == workspaceId, Date().timeIntervalSince(presets.at) < 60 { return }
-    guard presetsTask == nil, !workspaceId.isEmpty else { return }
-    presetsTask = Task { [weak self] in
-      guard let self else { return }
-      _ = try? await self.loadPresets(workspaceId)
-      self.presetsTask = nil
-    }
   }
 
   private func presetTitle(_ id: String) -> String {

@@ -46,7 +46,7 @@ checks = {
     'settings': ['Cloud/WorkspaceSettingsCloud.swift', 'Cloud/WorkspaceUsage.swift'],
     'workspace-settings-pages': ['LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/SettingsWorkspace.swift', 'Settings/ProjectVisibilitySections.swift', 'Settings/GitHubSettingsSections.swift'],
     'remote-settings': ['LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/LodyListState.swift', 'Settings/SettingsWorkspace.swift', 'Settings/RemoteSettingsSections.swift', 'Settings/AgentProviderSections.swift', 'Sessions/SessionUsageSelection.swift', 'Chat/LodyAgentIcon.swift'],
-    'session-rows': ['Sessions/SessionRelations.swift', 'LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/LodyListState.swift', 'Sessions/SessionCatalog.swift', 'Sessions/SessionRows.swift', 'Sessions/SessionTabSelection.swift', 'Sessions/HomeGrouping.swift', 'Sessions/InboxSections.swift', 'Sessions/StatusView.swift', 'Sessions/SessionEnvelope.swift', 'Sessions/SessionPermission.swift'],
+    'session-rows': ['Sessions/SessionRelations.swift', 'LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/LodyListState.swift', 'Sessions/SessionCatalog.swift', 'Sessions/SessionRows.swift', 'Sessions/SessionTabSelection.swift', 'Sessions/HomeGrouping.swift', 'Sessions/InboxSections.swift', 'Sessions/SessionEnvelope.swift', 'Sessions/SessionPermission.swift'],
     'ai-usage': ['LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/LodyListState.swift', 'Settings/AIUsageModels.swift', 'Settings/AIUsageSections.swift'],
     'settings-roles': ['LodyLocalization.swift', 'List/LodyListModels.swift', 'Settings/PromptShortcutSections.swift', 'Settings/AgentRoleSections.swift'],
     'notifications': ['Notifications/PushRegistration.swift', 'Notifications/PushPermissionLaunchRequest.swift', 'Notifications/PushClickBuffer.swift'],
@@ -121,6 +121,8 @@ if args.case:
         parser.error(f'Unknown check {args.case}; choose from {", ".join(checks)}')
     checks = {args.case: checks[args.case]}
 for files in checks.values():
+    if 'Sessions/SessionCatalog.swift' in files:
+        files.append('Sessions/StatusView.swift')
     if files and 'LodyLocalization.swift' not in files:
         files.append('LodyLocalization.swift')
     if 'LodyTint.swift' in files and 'Appearance/LodyDesign.swift' not in files:

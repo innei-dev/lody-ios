@@ -564,12 +564,17 @@ extension ChatListView: UICollectionViewDragDelegate, UICollectionViewDropDelega
     guard let status, dragging == nil, let item = dataSource.itemIdentifier(for: indexPath), let entry = entries[item],
       entry.kind == .session, entry.row.parentId.isEmpty, status.canDrag(entry.row.id)
     else { return [] }
-    let drag = UIDragItem(itemProvider: NSItemProvider())
+    let drag = UIDragItem(itemProvider: NSItemProvider(object: "" as NSString))
     drag.localObject = entry.row.id
+    session.localContext = item
+    return [drag]
+  }
+
+  func collectionView(_ collectionView: UICollectionView, dragSessionWillBegin session: UIDragSession) {
+    guard let item = session.localContext as? Item else { return }
     dragging = item
     lastDropTarget = nil
     dropFeedback.prepare()
-    return [drag]
   }
 
   func collectionView(_ collectionView: UICollectionView, dragSessionIsRestrictedToDraggingApplication session: UIDragSession) -> Bool { true }
