@@ -55,6 +55,29 @@ final class ChatListPreviewController: UIViewController {
       list.setSections(InboxSections.home(catalog, grouping: .status))
       return
     }
+    if LodyUIVerify.has("--ui-review-status") {
+      // The runtime's Status view layout as the catalog carries it: two pin sections, Focus with a
+      // woken row on top, a Later countdown and Settled (Later and Settled start collapsed).
+      let now = LodyRelativeTime.now()
+      let sessions = ["pin-a", "pin-b", "focus-woken", "focus-a", "focus-child", "later-a", "settled-a"].map {
+        SessionItem(id: $0, title: $0, projectId: "p", lastMessageAt: now - 3_600_000)
+      }
+      func layoutRow(_ id: String, _ tier: StatusViewRow.Tier, children: [StatusViewRow] = [], snoozedUntil: Double? = nil) -> StatusViewRow {
+        StatusViewRow(id: id, tier: tier, children: children, activityAt: now - 3_600_000, unread: id == "focus-woken",
+          snoozedUntil: snoozedUntil, woken: id == "focus-woken", canManage: true, canPrefer: true)
+      }
+      let layout = StatusViewLayout(
+        pinned: [
+          StatusViewPinnedSection(sectionId: nil, name: nil, rows: [layoutRow("pin-a", .pinned)]),
+          StatusViewPinnedSection(sectionId: "maintenance", name: "Maintenance", rows: [layoutRow("pin-b", .pinned)], hiddenCount: 2),
+        ],
+        focus: [layoutRow("focus-woken", .focus), layoutRow("focus-a", .focus, children: [layoutRow("focus-child", .focus)])],
+        later: [layoutRow("later-a", .later, snoozedUntil: now + 2 * 3_600_000)],
+        settled: [layoutRow("settled-a", .settled)]
+      )
+      list.setSections(InboxSections.home(SessionCatalog(sessions: sessions), grouping: .status, layout: layout, now: now))
+      return
+    }
     list.setSections([LodyListSection(id: "list-review", header: "Conversations", rows: rows)])
   }
 }

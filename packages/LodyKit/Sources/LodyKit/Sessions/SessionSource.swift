@@ -27,19 +27,26 @@ enum SessionWrite: Sendable {
 }
 
 typealias SessionWriteService = @MainActor (_ workspaceId: String, _ sessionId: String, _ write: SessionWrite) async throws -> Void
+typealias StatusViewService = @MainActor (_ workspaceId: String, _ command: StatusViewCommand) async throws -> Void
 
 @MainActor
 final class SessionSource {
   let changes: [Notification.Name]
   let write: SessionWriteService
+  /// Status view and pin section writes, planned by the shared runtime against its replica.
+  let statusCommand: StatusViewService
   private let read: @MainActor () -> SessionListState
   private let rawSession: @MainActor (String) -> String?
 
   init(
     changes: [Notification.Name], read: @escaping @MainActor () -> SessionListState,
-    raw: @escaping @MainActor (String) -> String? = { _ in nil }, write: @escaping SessionWriteService
+    raw: @escaping @MainActor (String) -> String? = { _ in nil }, write: @escaping SessionWriteService,
+    statusCommand: @escaping StatusViewService = { _, _ in
+      throw DataRuntime.failure("not_ready", String(localized: "native.runtime.sessionNotSynced", bundle: .lody))
+    }
   ) {
     self.changes = changes
+    self.statusCommand = statusCommand
     self.read = read
     rawSession = raw
     self.write = write
@@ -59,7 +66,8 @@ final class SessionSource {
         return
       }
       try await SessionActions.cloud(workspaceId, sessionId, write)
-    }
+    },
+    statusCommand: { workspaceId, command in try await StatusViewRuntime.command(workspaceId, command) }
   )
 
   // A persisted local watermark clears unread emphasis.
@@ -160,7 +168,7 @@ enum SessionPublished {
       cache = (key, base)
     }
     state.catalog = base
-    state.catalog.sessions += (published.pendingSessions ?? []).compactMap(\.value)
+    state.catalog.sessions += (published.pendingSessions ?? []).compactMap(\.value).map(SessionItem.markedPending)
     return state
   }
 
@@ -180,7 +188,7 @@ enum SessionCatalogPreview {
   static var state: SessionListState? {
     guard var state = base else { return nil }
     let pending = pendingSessions()
-    state.catalog.sessions += try! JSONDecoder().decode([SessionItem].self, from: JSONEncoder().encode(pending))
+    state.catalog.sessions += try! JSONDecoder().decode([SessionItem].self, from: JSONEncoder().encode(pending)).map(SessionItem.markedPending)
     return state
   }
   private static func pendingSessions() -> [OutboxValue] {
